@@ -1,0 +1,615 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Base Infrastructure + Airflow (EC2 + Docker) + PostgresDB"
+
+Parameters:
+  pIngestionBucket:
+    Description: "Bucket to store ingested files. Need to be globally unique name"
+    AllowedPattern: "^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$"
+    Type: "String"
+
+  pTagEnvironment:
+    AllowedValues:
+      - "production"
+      - "staging"
+      - "development"
+    Default: "development"
+    Description: "Environment type for default resource tagging."
+    Type: "String"
+
+  pTagOwner:
+    Type: "String"
+    Description: "Optional - Owner of the resources.  Person/Department, etc."
+    Default: ""
+
+  pRdsStorageSize:
+    Type: "Number"
+    Description: "RDS Storage Size in GB. (Min 20GB, Max 1000GB)"
+    Default: "50"
+    MinValue: "20"
+    MaxValue: "1000"
+
+  pRdsStorageType:
+    Type: "String"
+    Description: "RDS Storage Type"
+    Default: "gp2"
+    AllowedValues:
+      - "gp2"
+      - "io1"
+      - "standard"
+
+  pRdsInstanceClass:
+    Type: "String"
+    Description: "RDS Instance Class"
+    Default: "db.t3.small"
+    AllowedValues:
+      - "db.t3.small"
+      - "db.t3.medium"
+      - "db.t3.large"
+
+  pRdsType:
+    Type: "String"
+    AllowedValues:
+      - "postgres"
+    Default: "postgres"
+
+  pRdsPublic:
+    Type: "String"
+    AllowedValues:
+      - "Public"
+      - "Private"
+    Default: "Public"
+
+  pEc2KeyPair:
+    Type: "String"
+    AllowedPattern: "^[0-9a-zA-Z]+([0-9a-zA-Z-_]*[0-9a-zA-Z])*$"
+    Default: "xj_key_pair"
+
+  pEc2EbsSize:
+    Type: "Number"
+    Description: "Ec2 Ebs Storage Size (gp2) in GB. (Min 20GB, Max 1000GB)"
+    Default: "50"
+    MinValue: "20"
+    MaxValue: "1000"
+
+  pEc2InstanceClass:
+    Type: "String"
+    Description: "Ec2 Instance Class"
+    Default: "t2.small"
+    AllowedValues:
+      - "t2.small"
+      - "t2.medium"
+      - "t2.large"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Bucket Configuration"
+        Parameters:
+          - "pIngestionBucket"
+      - Label:
+          default: "EC2 Configuration"
+        Parameters:
+          - "pEc2KeyPair"
+          - "pEc2InstanceClass"
+          - "pEc2EbsSize"
+      - Label:
+          default: "RDS Configuration"
+        Parameters:
+          - "pRdsType"
+          - "pRdsInstanceClass"
+          - "pRdsStorageSize"
+          - "pRdsStorageType"
+          - "pRdsPublic"
+      - Label:
+          default: "Tagging"
+        Parameters:
+          - "pTagOwner"
+          - "pTagEnvironment"
+    ParameterLabels:
+      pIngestionBucket:
+        default: "Ingestion Bucket Name"
+      pTagOwner:
+        default: "Owner Tag"
+      pTagEnvironment:
+        default: "Environment Tag"
+      pRdsType:
+        default: "RDS Instance Type"
+      pRdsInstanceClass:
+        default: "RDS Instance Class"
+      pRdsStorageSize:
+        default: "RDS Storage Size (GB)"
+      pRdsStorageType:
+        default: "RDS Storage Type"
+      pEc2KeyPair:
+        default: "EC2 Key Pair (Optional)"
+      pEc2EbsSize:
+        default: "EC2 EBS Size (GB)"
+      pEc2InstanceClass:
+        default: "EC2 Instance Class"
+      pRdsPublic:
+        default: "Place RDS in Public Subnet?"
+
+Mappings:
+  mVpcConfig:
+    cidr:
+      vpc: "100.113.240.0/24"
+      publicSubnet1: "100.113.240.0/26"
+      publicSubnet2: "100.113.240.64/26"
+      privateSubnet1: "100.113.240.128/26"
+      privateSubnet2: "100.113.240.192/26"
+
+Conditions:
+  CondRdsPublic: !Equals [!Ref pRdsPublic, "Public"]
+  CondEc2KeyPair: !Not [!Equals [!Ref pEc2KeyPair, ""]]
+
+Resources:
+  IngestionBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-${pIngestionBucket}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: "AES256"
+      VersioningConfiguration:
+        Status: "Enabled"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: "environment"
+          Value: !Ref pTagEnvironment
+        - Key: "owner"
+          Value: !Ref pTagOwner
+    DeletionPolicy: Retain
+
+  Vpc:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !FindInMap ["mVpcConfig", "cidr", "vpc"]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-VPC"
+
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-IGW"
+
+  InternetGatewayAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicSubnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: "ap-southeast-1a"
+      CidrBlock: !FindInMap ["mVpcConfig", "cidr", "publicSubnet1"]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-PublicSubnet1"
+
+  PrivateSubnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: "ap-southeast-1a"
+      CidrBlock: !FindInMap ["mVpcConfig", "cidr", "privateSubnet1"]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-PrivateSubnet1"
+
+  NatGateway1EIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn: "InternetGatewayAttachment"
+    Properties:
+      Domain: "vpc"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-NatEip1"
+
+  NatGateway1:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName} Public Routes"
+
+  DefaultPublicRoute:
+    Type: "AWS::EC2::Route"
+    DependsOn: "InternetGatewayAttachment"
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable1:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName} Private Routes"
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet1InternetRoute:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway1
+
+  PublicSubnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: "ap-southeast-1b"
+      CidrBlock: !FindInMap ["mVpcConfig", "cidr", "publicSubnet2"]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-PublicSubnet2"
+
+  PrivateSubnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: "ap-southeast-1b"
+      CidrBlock: !FindInMap ["mVpcConfig", "cidr", "privateSubnet2"]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-PrivateSubnet2"
+
+  NatGateway2EIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn: "InternetGatewayAttachment"
+    Properties:
+      Domain: "vpc"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-NatEip2"
+
+  NatGateway2:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+
+
+  PublicSubnet2RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable2:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName} Private Routes"
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  PrivateSubnet2InternetRoute:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway2
+
+  SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: "Security group for Rds and Airflow"
+      SecurityGroupIngress:
+        - IpProtocol: "TCP"
+          FromPort: 22
+          ToPort: 22
+          CidrIp: "0.0.0.0/0"
+          Description: "ssh"
+        - IpProtocol: "TCP"
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: "0.0.0.0/0"
+          Description: "airflow"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          FromPort: -1
+          ToPort: -1
+          CidrIp: "0.0.0.0/0"
+          Description: "all"
+      Tags:
+        - Key: "environment"
+          Value: !Ref pTagEnvironment
+        - Key: "owner"
+          Value: !Ref pTagOwner
+
+  SecurityGroupPostgresIngress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: "TCP"
+      FromPort: 5432
+      ToPort: 5432
+      CidrIp: !If [CondRdsPublic, "0.0.0.0/0", !Ref "AWS::NoValue"]
+      SourceSecurityGroupId: !If [CondRdsPublic, !Ref "AWS::NoValue" , !Ref SecurityGroup]
+      Description: "Allow Postgres Connection from Security Group"
+
+  Rds:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBInstanceIdentifier: !Sub "${AWS::StackName}-RDS-${pRdsType}"
+      AllocatedStorage: !Ref pRdsStorageSize
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: false
+      DBSubnetGroupName: !Ref RdsSubnetGroup
+      DBInstanceClass: !Ref pRdsInstanceClass
+      EnableCloudwatchLogsExports:
+        - "postgresql"
+        - "upgrade"
+      EnableIAMDatabaseAuthentication: true
+      Engine: !Ref pRdsType
+      EngineVersion: "13.1"
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref RDSInstanceSecret, ':SecretString:username}}' ]]
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref RDSInstanceSecret, ':SecretString:password}}' ]]
+      MaxAllocatedStorage: "100"
+      Port: "5432"
+      PubliclyAccessible: !If [CondRdsPublic, "true", "false"]
+      StorageEncrypted: true
+      StorageType: !Ref pRdsStorageType
+      Tags:
+        - Key: "environment"
+          Value: !Ref pTagEnvironment
+        - Key: "owner"
+          Value: !Ref pTagOwner
+      VPCSecurityGroups:
+        - !Ref SecurityGroup
+
+  RdsSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: !Sub "${AWS::StackName} RDS Subnet Group"
+      DBSubnetGroupName: !Sub "${AWS::StackName}-DB-SubnetGroup"
+      SubnetIds:
+        - !If [CondRdsPublic, !Ref PublicSubnet1, !Ref PrivateSubnet1]
+        - !If [CondRdsPublic, !Ref PublicSubnet2, !Ref PrivateSubnet2]
+      Tags:
+        - Key: "environment"
+          Value: !Ref pTagEnvironment
+        - Key: "owner"
+          Value: !Ref pTagOwner
+
+  RDSInstanceSecret:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub "${AWS::StackName}-rds-secret"
+      Description: 'This is the secret for my RDS instance'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "postgres"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  SecretRDSInstanceAttachment:
+    Type: "AWS::SecretsManager::SecretTargetAttachment"
+    Properties:
+      SecretId: !Ref RDSInstanceSecret
+      TargetId: !Ref Rds
+      TargetType: "AWS::RDS::DBInstance"
+
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: "ami-03ca998611da0fe12"
+      InstanceType: !Ref pEc2InstanceClass
+      KeyName: !If [CondEc2KeyPair, !Ref pEc2KeyPair, !Ref "AWS::NoValue"]
+      IamInstanceProfile: !Ref InstanceProfileEc2
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeType: "gp2"
+            DeleteOnTermination: "true"
+            VolumeSize: !Ref pEc2EbsSize
+            Encrypted: "true"
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref SecurityGroup
+          SubnetId: !Ref PublicSubnet1
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            set -x -e
+            export PATH=$PATH:/usr/local/bin
+            export LC_ALL=en_US.UTF-8
+
+            # update and install requirements
+            yum -y update
+            yum -y install git
+            yum -y install docker
+            yum -y install postgresql
+
+            # install docker-compose
+            curl -L "https://github.com/docker/compose/releases/download/1.29.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+
+            # start docker
+            systemctl enable docker.service
+            systemctl enable containerd.service
+            systemctl start docker
+
+            # copy airflow files from git
+            mkdir /home/ec2-user/git
+            cd /home/ec2-user/git
+            git clone https://github.com/dsaidgovsg/cloudformation_airflow.git .
+            chown ec2-user:ec2-user /home/ec2-user/git -R
+
+            # create cron job to sync
+            cat <<EOF > gitpull.sh
+            date
+            cd /home/ec2-user/git
+            git pull
+            sudo chown ec2-user:ec2-user /home/ec2-user/git -R
+            EOF
+
+            touch /home/ec2-user/git/cron-airflow.log
+            chown ec2-user:ec2-user /home/ec2-user/git/cron-airflow.log
+            chmod +x /home/ec2-user/git/gitpull.sh
+            cronjob="*/5 * * * * /bin/bash /home/ec2-user/git/gitpull.sh >/home/ec2-user/git/cron-airflow.log 2>&1"
+            echo "$cronjob" | crontab -u "ec2-user" -
+            systemctl enable crond.service
+
+
+            # create config.json in config folder
+            cat <<EOF > /home/ec2-user/git/airflow2/config/config.json
+            {
+              "aws": {
+                "rds": {
+                  "hostname": "${Rds.Endpoint.Address}",
+                  "port": "5432",
+                  "database": "postgres",
+                  "secret_arn": "${RDSInstanceSecret}"
+                },
+                "s3": {
+                  "ingestion_bucket": "${AWS::StackName}-${pIngestionBucket}"
+                }
+              }
+            }
+            EOF
+
+            # start airflow
+            cd /home/ec2-user/git/airflow2
+            docker-compose up -d
+
+
+
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-Airflow-Ec2"
+        - Key: "environment"
+          Value: !Ref pTagEnvironment
+        - Key: "owner"
+          Value: !Ref pTagOwner
+
+  Ec2Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-airflow-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: "2008-10-17"
+        Statement:
+          - Sid: ""
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "s3ListBucket"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-${pIngestionBucket}"
+        - PolicyName: "s3ReadBucket"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectAcl"
+                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-${pIngestionBucket}/*"
+        - PolicyName: "s3WriteBucket"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                  - "s3:DeleteObject"
+                  - "s3:DeleteObjectVersion"
+                  - "s3:PutLifeCycleConfiguration"
+                Resource: !Sub "arn:aws:s3:::${AWS::StackName}-${pIngestionBucket}/*"
+        - PolicyName: "rdsAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "rds:*"
+                  - "rds-data:*"
+                Resource: "*"
+        - PolicyName: "getRdsSecret"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "secretsmanager:GetSecretValue"
+                Resource: !Ref RDSInstanceSecret
+
+  InstanceProfileEc2:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref Ec2Role
+      InstanceProfileName: !Ref Ec2Role
+
+Outputs:
+  RdsUrl:
+    Description: "RDS Public DNS Hostname URL"
+    Value: !GetAtt Rds.Endpoint.Address
+  Ec2Url:
+    Description: "EC2 Public DNS Hostname URL"
+    Value: !GetAtt Ec2Instance.PublicDnsName
+  AirflowUrl:
+    Description: "EC2 Public DNS Hostname URL"
+    Value: !Sub "${Ec2Instance.PublicDnsName}:8080"
+

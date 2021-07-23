@@ -1,0 +1,13 @@
+{
+  "aws": {
+    "rds": {
+      "hostname": "${Rds.Endpoint.Address}",
+      "port": "5432",
+      "database": "postgres",
+      "secret_arn": "${RDSInstanceSecret}"
+    },
+    "s3": {
+      "ingestion_bucket": "${AWS::StackName}-${pIngestionBucket}"
+    }
+  }
+}

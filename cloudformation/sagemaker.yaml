@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Sagemaker Instance"
+
+Parameters:
+  pInstanceType:
+    AllowedValues:
+      - "ml.t2.medium"
+      - "ml.t2.large"
+      - "ml.t2.xlarge"
+      - "ml.t2.2xlarge"
+      - "ml.t3.medium"
+      - "ml.t3.large"
+      - "ml.t3.xlarge"
+      - "ml.t3.2large"
+    Default: "ml.t3.medium"
+    Description: ""
+    Type: "String"
+
+  pSageMakerBucket:
+    Description: "S3 bucket with scripts, common notebooks, and home directory backups."
+    Default: ""
+    Type: "String"
+
+  pDataBucket:
+    Description: "S3 bucket with ingested data"
+    Default: ""
+    Type: "String"
+
+  pSubnetId:
+    Description: "Subnet ID in which the SageMaker Notebook Instance will be launched."
+    Type: AWS::EC2::Subnet::Id
+
+  pSubnetType:
+    Description: "Type of subnet the notebook instance will be deployed in"
+    Default: "private"
+    Type: "String"
+
+  pTagEnvironment:
+    AllowedValues:
+      - "production"
+      - "staging"
+      - "development"
+    Default: "development"
+    Description: "Environment type for default resource tagging."
+    Type: "String"
+
+  pTagOwner:
+    Default: ""
+    Description: "(Optional) Owner for default resource tagging. Suggested values are <User Name>, <Department Name>, <Project Name>, etc."
+    Type: "String"
+
+  pVolumeSize:
+    Default: "20"
+    Description: "Notebook instance data volume size (GB)."
+    MaxValue: "500"
+    MinValue: "5"
+    Type: "Number"
+
+  pSgSagemaker:
+    Description: "This security group ID will be attached to the notebook instance."
+    Type: AWS::EC2::SecurityGroup::Id
+
+  pRdsHostname:
+    Description: "Public DNS Hostname of RDS Instance"
+    Type: "String"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - "pSubnetId"
+          - "pSubnetType"
+          - "pSgSagemaker"
+      - Label:
+          default: "Notebook Instance Configuration"
+        Parameters:
+          - "pInstanceType"
+          - "pVolumeSize"
+      - Label:
+          default: "RDS Configuration"
+        Parameters:
+          - "pRdsHostname"
+      - Label:
+          default: "S3 Configuration"
+        Parameters:
+          - "pSageMakerBucket"
+          - "pDataBucket"
+      - Label:
+          default: "Tagging"
+        Parameters:
+          - "pTagEnvironment"
+          - "pTagOwner"
+    ParameterLabels:
+      pSubnetId:
+        default: "Subnet ID"
+      pSubnetType:
+        default: "Subnet Type"
+      pInstanceType:
+        default: "Instance Type"
+      pVolumeSize:
+        default: "Volume Size"
+      pSageMakerBucket:
+        default: "SageMaker Bucket"
+      pSgSagemaker:
+        default: "SageMaker Security Group ID"
+      pTagOwner:
+        default: "Owner"
+      pTagEnvironment:
+        default: "Environment"
+      pRdsHostname:
+        default: "RDS Public DNS Hostname"
+      pRdsResourceId:
+        default: "RDS Resource Id"
+      pRdsUser:
+        default: "RDS User for IAM authentication"
+      pDataBucket:
+        default: "Data Bucket with ingested data"
+
+
+Conditions:
+  CondSubnetTypePrivate: !Equals [!Ref pSubnetType, "private"]
+
+Resources:
+  instance:
+    Type: "AWS::SageMaker::NotebookInstance"
+    Properties:
+      DirectInternetAccess: !If [ CondSubnetTypePrivate, "Disabled", "Enabled"]
+      InstanceType: !Ref pInstanceType
+      RoleArn: !GetAtt role.Arn
+      LifecycleConfigName: !GetAtt lifecycleConfiguration.NotebookInstanceLifecycleConfigName
+      NotebookInstanceName: !Ref AWS::StackName
+      RootAccess: Enabled
+      SubnetId: !Ref pSubnetId
+      VolumeSizeInGB: !Ref pVolumeSize
+      SecurityGroupIds:
+        - !Ref pSgSagemaker
+      Tags:
+        - Key: "Name"
+          Value: !Ref AWS::StackName
+        - Key: "environment"
+          Value: !Ref pTagEnvironment
+        - Key: "owner"
+          Value: !Ref pTagOwner
+
+  lifecycleConfiguration:
+    Type: "AWS::SageMaker::NotebookInstanceLifecycleConfig"
+    Properties:
+      NotebookInstanceLifecycleConfigName: !Sub "${AWS::StackName}"
+      OnCreate:
+        - Content:
+            Fn::Base64:
+              !Sub |
+                #!/bin/bash
+                set -ex
+
+                #install postgresql
+                sudo yum -y install postgresql
+                pip install --upgrade pip
+                pip install sqlalchemy
+                pip install psycopg2-binary
+
+                BUCKET="${pSageMakerBucket}"
+                EC2_USER_BIN="/home/ec2-user/SageMaker/bin/"
+                sudo -u ec2-user -i <<EOF
+                set -ex
+                /usr/bin/aws s3 cp s3://"$BUCKET"/scripts/ "$EC2_USER_BIN" --recursive
+                find "$EC2_USER_BIN" -type f -exec chmod -v 700 {} \;
+
+                EOF
+
+      OnStart:
+        - Content:
+            Fn::Base64:
+              !Sub |
+                #!/bin/bash
+                set -ex
+
+                BUCKET="${pSageMakerBucket}"
+                DIRECTORY="/home/ec2-user/SageMaker/"
+
+                # Copy previously backed up user notebooks
+                /usr/bin/aws s3 cp s3://$BUCKET/${AWS::StackName}/ $DIRECTORY --recursive
+                # Reset bin permissions
+                find "$DIRECTORY/bin/" -type f -exec chmod -v 700 {} \;
+                # Copy common organization notebooks.  This will overwrite common notebooks previously saved to the home directory
+                /usr/bin/aws s3 cp s3://$BUCKET/common-notebooks/ $DIRECTORY/common-notebooks/ --recursive
+
+                # Use the system AWS, since ec2-user may change conda environments
+                CMD="/usr/bin/aws s3 sync --exclude 'bin/*' --exclude '.sparkmagic/*' --exclude '*.ipynb_checkpoints/*' $DIRECTORY s3://$BUCKET/${AWS::StackName}/ > /home/ec2-user/s3-backup.log 2>&1"
+                chown "ec2-user":"ec2-user" $DIRECTORY --recursive
+                # Backup the notebook details to S3 on 5 minute intervals
+                cronjob="*/5 * * * * $CMD"
+                echo "$cronjob" | crontab -u "ec2-user" -
+
+                # Create environment variable for hostname
+                sudo touch /etc/profile.d/jupyter-env.sh
+                echo "export RDS_HOSTNAME=${pRdsHostname}" >> /etc/profile.d/jupyter-env.sh
+                initctl restart jupyter-server --no-wait
+
+                # Conda/Pip additions
+                sudo -u ec2-user -i <<EOF
+                source /home/ec2-user/anaconda3/bin/activate JupyterSystemEnv
+
+                jupyter labextension install @jupyter-widgets/jupyterlab-manager
+                source /home/ec2-user/anaconda3/bin/deactivate
+
+                # Prevent iopub throttling
+                sed -i.bak 's/^#c.NotebookApp.iopub_data_rate_limit.*$/c.NotebookApp.iopub_data_rate_limit = 1000000/' ~/.jupyter/jupyter_notebook_config.py
+                EOF
+
+  role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "sagemaker.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "cloudwatchWrite"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogStream"
+                  - "logs:CreateLogGroup"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+        - PolicyName: "s3ListSagemakerBucket"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListObject"
+                  - "s3:ListBucket"
+                Resource: !Sub "arn:aws:s3:::${pSageMakerBucket}"
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Sub "${AWS::StackName}/"
+                      - "common-notebooks/"
+                      - "scripts/"
+        - PolicyName: "s3FullUserPathControl"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "s3:*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${pSageMakerBucket}/${AWS::StackName}/*"
+        - PolicyName: "s3CommonNotebookReadOnly"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectAcl"
+                Resource:
+                  - !Sub "arn:aws:s3:::${pSageMakerBucket}/common-notebooks/*"
+                  - !Sub "arn:aws:s3:::${pSageMakerBucket}/scripts/*"
+        - PolicyName: "s3ListDataBucket"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource: !Sub "arn:aws:s3:::${pDataBucket}"
+        - PolicyName: "s3ReadDataBucket"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectAcl"
+                Resource: !Sub "arn:aws:s3:::${pDataBucket}/*"
+      RoleName: !Sub "sagemaker-${AWS::StackName}"
+
+
+Outputs:
+  SmUrl:
+    Description: "Console Notebook URL"
+    Value: !Sub "https://console.aws.amazon.com/sagemaker/home?region=${AWS::Region}#/notebook-instances/${AWS::StackName}"

@@ -1,0 +1,8 @@
+.idea/*
+.DS_Store
+.gitattributes
+*/.DS_Store
+*/__pycache__
+__pycache__/*
+*/__pycache__/*
+airflow2/dags/__pycache__/*
