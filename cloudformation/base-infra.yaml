@@ -482,7 +482,7 @@ Resources:
             # copy airflow files from git
             mkdir /home/ec2-user/git
             cd /home/ec2-user/git
-            git clone https://github.com/dsaidgovsg/cloudformation_airflow.git .
+            git clone https://github.com/reivaxteo/cloudformation_airflow.git .
             chown ec2-user:ec2-user /home/ec2-user/git -R
 
             # create cron job to sync
