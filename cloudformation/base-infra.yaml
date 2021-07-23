@@ -61,7 +61,6 @@ Parameters:
 
   pEc2KeyPair:
     Type: "String"
-    AllowedPattern: "^[0-9a-zA-Z]+([0-9a-zA-Z-_]*[0-9a-zA-Z])*$"
     Default: ""
 
   pEc2EbsSize:
