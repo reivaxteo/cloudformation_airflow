@@ -1,6 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "Base Infrastructure + Airflow (EC2 + Docker) + PostgresDB"
 
+
+
+
 Parameters:
   pIngestionBucket:
     Description: "Bucket to store ingested files. Need to be globally unique name"
